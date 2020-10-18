@@ -602,6 +602,13 @@ bbedit)
     downloadURL=$(curl -s https://versioncheck.barebones.com/BBEdit.xml | grep dmg | sort | tail -n1 | cut -d">" -f2 | cut -d"<" -f1)
     expectedTeamID="W52GZAXT98"
     ;;
+thunderbird)
+    name="Thunderbird"
+    type="dmg"
+    downloadURL="https://download.mozilla.org/?product=thunderbird-latest&os=osx&lang=ja-JP-mac"
+    expectedTeamID="43AQ936H96"
+    blockingProcesses=( thunderbird )
+    ;;
 firefox)
     name="Firefox"
     type="dmg"
