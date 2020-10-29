@@ -605,6 +605,13 @@ bbedit)
 thunderbird)
     name="Thunderbird"
     type="dmg"
+    downloadURL="https://download.mozilla.org/?product=thunderbird-latest&os=osx&lang=en-US"
+    expectedTeamID="43AQ936H96"
+    blockingProcesses=( thunderbird )
+    ;;
+thunderbird-ja)
+    name="Thunderbird"
+    type="dmg"
     downloadURL="https://download.mozilla.org/?product=thunderbird-latest&os=osx&lang=ja-JP-mac"
     expectedTeamID="43AQ936H96"
     blockingProcesses=( thunderbird )
@@ -613,6 +620,13 @@ firefox)
     name="Firefox"
     type="dmg"
     downloadURL="https://download.mozilla.org/?product=firefox-latest&os=osx&lang=en-US"
+    expectedTeamID="43AQ936H96"
+    blockingProcesses=( firefox )
+    ;;
+firefox-ja)
+    name="Firefox"
+    type="dmg"
+    downloadURL="https://download.mozilla.org/?product=firefox-latest&os=osx&lang=ja-JP-mac"
     expectedTeamID="43AQ936H96"
     blockingProcesses=( firefox )
     ;;
