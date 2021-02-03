@@ -8,8 +8,8 @@
 # inspired by the download scripts from William Smith and Sander Schram
 # with additional ideas and contribution from Isaac Ordonez, Mann consulting
 
-VERSION='0.4'
-VERSIONDATE='20200826'
+VERSION='0.5'
+VERSIONDATE='20201019'
 
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
@@ -35,6 +35,9 @@ BLOCKING_PROCESS_ACTION=prompt_user
 #   - silent_fail  exit script without prompt or installation
 #   - prompt_user  show a user dialog for each blocking process found
 #                  abort after three attempts to quit
+#   - prompt_user_then_kill
+#                  show a user dialog for each blocking process found,
+#                  attempt to quit two times, kill the process finally
 #   - kill         kill process without prompting or giving the user a chance to save
 
 
@@ -189,10 +192,10 @@ downloadURLFromGit() { # $1 git user name, $2 git repo name
     
     if [ -n "$archiveName" ]; then
     downloadURL=$(curl --silent --fail "https://api.github.com/repos/$gitusername/$gitreponame/releases/latest" \
-    | awk -F '"' "/browser_download_url/ && /$archiveName/ { print \$4 }")
+    | awk -F '"' "/browser_download_url/ && /$archiveName\"/ { print \$4; exit }")
     else
     downloadURL=$(curl --silent --fail "https://api.github.com/repos/$gitusername/$gitreponame/releases/latest" \
-    | awk -F '"' "/browser_download_url/ && /$filetype\"/ { print \$4 }")
+    | awk -F '"' "/browser_download_url/ && /$filetype\"/ { print \$4; exit }")
     fi
     if [ -z "$downloadURL" ]; then
         printlog "could not retrieve download URL for $gitusername/$gitreponame"
@@ -200,6 +203,18 @@ downloadURLFromGit() { # $1 git user name, $2 git repo name
     else
         echo "$downloadURL"
         return 0
+    fi
+}
+
+
+xpath() {
+    # the xpath tool changes in Big Sur and now requires the `-e` option    
+    if [[ $(sw_vers -buildVersion) > "20A" ]]; then
+        /usr/bin/xpath -e $@
+        # alternative: switch to xmllint (which is not perl)
+        #xmllint --xpath $@ -
+    else
+        /usr/bin/xpath $@
     fi
 }
 
@@ -249,12 +264,18 @@ checkRunningProcesses() {
                       printlog "killing process $x"
                       pkill $x
                       ;;
-                    prompt_user)
+                    prompt_user|prompt_user_then_kill)
                       button=$(displaydialog "Quit “$x” to continue updating? (Leave this dialogue if you want to activate this update later)." "The application “$x” needs to be updated.")
                       if [[ $button = "Not Now" ]]; then
                         cleanupAndExit 10 "user aborted update"
                       else
-                        runAsUser osascript -e "tell app \"$x\" to quit"
+                        if [[ $i = 3 && $BLOCKING_PROCESS_ACTION = "prompt_user_then_kill" ]]; then
+                          printlog "killing process $x"
+                          pkill $x
+                        else
+                          printlog "telling app $x to quit"
+                          runAsUser osascript -e "tell app \"$x\" to quit"
+                        fi
                       fi
                       ;;
                     silent_fail)
@@ -355,8 +376,21 @@ mountDMG() {
 
 installFromDMG() {
     mountDMG
-
-    installAppWithPath "$dmgmount/$appName"
+    
+    applicationPath="$dmgmount/$appName"
+    printlog "looking for app: $applicationPath"
+    if [[ ! -d $applicationPath ]]; then
+        # find first file ending with 'app'
+        findfiles=$(find "$dmgmount" -iname "*.app" -maxdepth 1 -mindepth 1 )
+        filearray=( ${(f)findfiles} )
+        if [[ ${#filearray} -eq 0 ]]; then
+            cleanupAndExit 21 "couldn't find app in dmg $archiveName"
+        fi
+        applicationPath="${filearray[1]}"
+        printlog "found app: $applicationPath"
+    fi
+    
+    installAppWithPath "$applicationPath"
 }
 
 installFromPKG() {
@@ -434,7 +468,7 @@ installPkgInDmg() {
     # locate pkg in dmg
     if [[ -z $pkgName ]]; then
         # find first file ending with 'pkg'
-        findfiles=$(find "$dmgmount" -iname "*.pkg" -maxdepth 1  )
+        findfiles=$(find "$dmgmount" -iname "*.pkg" -maxdepth 1 -mindepth 1 )
         filearray=( ${(f)findfiles} )
         if [[ ${#filearray} -eq 0 ]]; then
             cleanupAndExit 20 "couldn't find pkg in dmg $archiveName"
@@ -507,7 +541,7 @@ if [[ $# -eq 0 ]]; then
     grep -E '^[a-z0-9\-]*(\)|\|\\)$' "$0" | tr -d ')|\' | grep -v -E '^(broken.*|longversion|version|valuesfromarguments)$' | sort
     exit 0
 elif [[ $1 == "/" ]]; then
-	# jamf uses sends '/' as the first argument
+    # jamf uses sends '/' as the first argument
     printlog "shifting arguments for Jamf"
     shift 3
 fi
@@ -782,6 +816,13 @@ openvpnconnect)
     downloadURL="https://openvpn.net/downloads/openvpn-connect-v2-macos.dmg"
     expectedTeamID="ACV7L3WCD8"
     ;;
+openvpnconnectv3)
+    # credit: @lotnix 
+    name="OpenVPN Connect"
+    type="pkgInDmg"
+    downloadURL="https://openvpn.net/downloads/openvpn-connect-v3-macos.dmg"
+    expectedTeamID="ACV7L3WCD8"
+    ;;
 pacifist)
     name="Pacifist"
     type="dmg"
@@ -801,9 +842,10 @@ webexmeetings)
     downloadURL="https://akamaicdn.webex.com/client/webexapp.dmg"
     expectedTeamID="DE8Y96K9QP"
     ;;
+webex|\
 webexteams)
     # credit: Erik Stam (@erikstam)
-    name="Webex Teams"
+    name="Webex"
     type="dmg"
     downloadURL="https://binaries.webex.com/WebexTeamsDesktop-MACOS-Gold/WebexTeams.dmg"
     expectedTeamID="DE8Y96K9QP"
@@ -919,6 +961,12 @@ teamviewer)
     downloadURL="https://download.teamviewer.com/download/TeamViewer.dmg"
     expectedTeamID="H7UGFBUGV6"
     ;;
+teamviewerqs)
+    name="TeamViewerQS"
+    type="dmg"
+    downloadURL="https://download.teamviewer.com/download/TeamViewerQS.dmg"
+    expectedTeamID="H7UGFBUGV6"
+    ;;
 iterm2)
     name="iTerm"
     type="zip"
@@ -1007,7 +1055,7 @@ brave)
     # credit: @securitygeneration
     name="Brave Browser"
     type="dmg"
-    downloadURL=$(curl --location --fail --silent "https://updates.bravesoftware.com/sparkle/Brave-Browser/stable/appcast.xml" | xpath '//rss/channel/item[1]/enclosure/@url' 2>/dev/null  | cut -d '"' -f 2)
+    downloadURL=$(curl --location --fail --silent "https://updates.bravesoftware.com/sparkle/Brave-Browser/stable/appcast.xml" | xpath '//rss/channel/item[last()]/enclosure/@url' 2>/dev/null  | cut -d '"' -f 2)
     expectedTeamID="KL8N8XSYF4"
     ;;
 umbrellaroamingclient)
@@ -1097,7 +1145,7 @@ torbrowser)
     # credit: Søren Theilgaard (@theilgaard)
     name="Tor Browser"
     type="dmg"
-    downloadURL=https://www.torproject.org$(curl -fs https://www.torproject.org/download/ | grep "downloadLink" | grep dmg | cut -d '"' -f 4)
+    downloadURL=https://www.torproject.org$(curl -fs https://www.torproject.org/download/ | grep "downloadLink" | grep -m 1 dmg | cut -d '"' -f 4)
     appNewVersion=$(curl -fs https://www.torproject.org/download/ | grep "downloadLink" | grep dmg | cut -d '"' -f 4 | cut -d / -f 4)
     expectedTeamID="MADPSAYN6T"
     ;;
@@ -1114,7 +1162,7 @@ nomad)
     name="NoMAD"
     type="pkg"
     downloadURL="https://files.nomad.menu/NoMAD.pkg"
-    expectedTeamID="AAPZK3CB24"
+    expectedTeamID="VRPY9KHGX6"
     ;;
 bettertouchtool)
     # credit: Tadayuki Onishi (@kenchan0130)
@@ -1132,9 +1180,9 @@ r)
     ;; 
 8x8)
     # credit: #D-A-James from MacAdmins Slack and Isaac Ordonez, Mann consulting (@mannconsulting)
-    name="8x8 - Virtual Office"
+    name="8x8 Work"
     type="dmg"
-    downloadURL=$(curl -fs https://support.8x8.com/cloud-phone-service/voice/virtual-office-desktop/download-virtual-office-desktop | grep -m 1 -o "http.*VOD.*.dmg")
+    downloadURL=$(curl -fs -L https://support.8x8.com/cloud-phone-service/voice/work-desktop/download-8x8-work-for-desktop | grep -m 1 -o "https.*dmg" | sed 's/\"//' | awk '{print $1}')
     expectedTeamID="FC967L3QRG"
     ;;
 egnyte)
@@ -1250,6 +1298,478 @@ skitch)
     expectedTeamID="J8RPQ294UB"
     Company="Evernote"
     ;;
+dialpad)
+    # credit: @ehosaka
+    name="Dialpad"
+    type="dmg"
+    downloadURL="https://storage.googleapis.com/dialpad_native/osx/Dialpad.dmg"
+    expectedTeamID="9V29MQSZ9M"
+    ;;
+amazonworkspaces)
+    # credit: Isaac Ordonez, Mann consulting (@mannconsulting)
+    name="Workspaces"
+    type="pkg"
+    downloadURL="https://d2td7dqidlhjx7.cloudfront.net/prod/global/osx/WorkSpaces.pkg"
+    # appNewVersion=$(curl -fs https://d2td7dqidlhjx7.cloudfront.net/prod/iad/osx/WorkSpacesAppCast_macOS_20171023.xml | grep -o "Version*.*<" | head -1 | cut -d " " -f2 | cut -d "<" -f1)
+    expectedTeamID="94KV3E626L"
+    ;;
+apparency)
+    name="Apparency"
+    type="dmg"
+    downloadURL="https://www.mothersruin.com/software/downloads/Apparency.dmg"
+    expectedTeamID="936EB786NH"
+    ;;
+skype)
+    # credit: Isaac Ordonez, Mann consulting (@mannconsulting)
+    # CONSUMER version of skype, business version is `microsoftskypeforbusiness`
+    name="Skype"
+    type="dmg"
+    downloadURL="https://get.skype.com/go/getskype-skypeformac"
+    expectedTeamID="AL798K98FX"
+    ;;
+bluejeans)
+    # credit: Isaac Ordonez, Mann consulting (@mannconsulting)
+    name="BlueJeans"
+    type="pkg"
+    downloadURL=$(curl -fs "https://www.bluejeans.com/downloads" | xmllint --html --format - 2>/dev/null | grep -o "https://.*BlueJeansInstaller.dmg" | sed 's/dmg/pkg/g')
+    expectedTeamID="HE4P42JBGN"
+    ;;
+ricohpsprinters)
+    # credit: Isaac Ordonez, Mann consulting (@mannconsulting)
+    name="Ricoh PS Printers"
+    type="pkgInDmg"
+    downloadURL=$(curl -fs https://support.ricoh.com//bb/html/dr_ut_e/rc3/model/mpc3004ex/mpc3004exen.htm | xmllint --html --format - 2>/dev/null | grep -m 1 -o "https://.*.dmg" | cut -d '"' -f 1)
+    expectedTeamID="5KACUT3YX8"
+    ;;
+ringcentralphone)
+    # credit: Eric Gjerde, When I Work (@ericgjerde on MacAdmins Slack)
+    # note: the DMG says RingCentral Phone, the installed app says RingCentral Phone, but the app in the DMG is 'RingCentral for Mac.app'
+    name="RingCentral for Mac"
+    type="dmg"
+    downloadURL="https://downloads.ringcentral.com/sp/RingCentralForMac"
+    expectedTeamID="M932RC5J66"
+    blockingProcesses=( "RingCentral Phone" )
+    ;;
+inkscape)
+    # credit: Fredrik Larsson (@fredrik_l on MacAdmins Slack)
+    name="Inkscape"
+    type="dmg"
+    downloadURL=https://inkscape.org$(inkscapemacurl=$(curl -s -L "https://inkscape.org/release/" | grep -Eio '/release/inkscape-(.*)/mac-os-x/([0-9]*)-([0-9]*)/dl/') && curl -s -L "https://inkscape.org$inkscapemacurl" | grep -Eio 'href="/gallery/item/([0-9]*)/(.*).dmg' | cut -c7-)
+    expectedTeamID="SW3D6BB6A6"
+    ;;    
+gimp)
+    # credit: Fredrik Larsson (@fredrik_l on MacAdmins Slack)
+    name="GIMP"
+    type="dmg"
+    downloadURL=https://$(curl -s -L "https://www.gimp.org/downloads/" | grep -Eio 'download.gimp.org/mirror/pub/gimp/v.*/osx/(.*).dmg')
+    expectedTeamID="T25BQ8HSJF"
+    ;;
+qgis-macos-pr)
+    # credit: Rob Smithers (@SmithersJr on MacAdmins Slack)
+    name="QGIS"
+    type="dmg"
+    downloadURL="https://qgis.org/downloads/macos/qgis-macos-pr.dmg"
+    expectedTeamID="4F7N4UDA22"
+    ;;
+osxfuse)
+    # credit: Fredrik Larsson (@fredrik_l on MacAdmins Slack)
+    name="FUSE for macOS"
+    type="pkgInDmg"
+    downloadURL=$(downloadURLFromGit osxfuse osxfuse)
+    expectedTeamID="3T5GSNBU6W"
+    ;;
+veracrypt)
+    # credit: Fredrik Larsson (@fredrik_l on MacAdmins Slack)
+    name="VeraCrypt"
+    type="pkgInDmg"
+    downloadURL=$(curl -s -L "https://www.veracrypt.fr/en/Downloads.html" | grep -Eio 'href="https://launchpad.net/veracrypt/trunk/(.*)/&#43;download/VeraCrypt_([0-9].*).dmg"' | cut -c7- | sed -e 's/"$//' | sed "s/&#43;/+/g")
+    expectedTeamID="Z933746L2S"
+    ;;
+cryptomator)
+    # credit: Fredrik Larsson (@fredrik_l on MacAdmins Slack)
+    name="Cryptomator"
+    type="dmg"
+    downloadURL=$(downloadURLFromGit cryptomator cryptomator)
+    expectedTeamID="YZQJQUHA3L"
+    ;;
+prism7)
+    # credit: Fredrik Larsson (@fredrik_l on MacAdmins Slack)
+    name="Prism 7"
+    type="dmg"
+    downloadURL="http://cdn.graphpad.com/downloads/prism/7/InstallPrism7.dmg"
+    expectedTeamID="YQ2D36NS9M"
+    ;;
+prism8)
+    # credit: Fredrik Larsson (@fredrik_l on MacAdmins Slack)
+    name="Prism 8"
+    type="dmg"
+    downloadURL="http://cdn.graphpad.com/downloads/prism/8/InstallPrism8.dmg"
+    expectedTeamID="YQ2D36NS9M"
+    ;;
+snapgeneviewer)
+    # credit: Fredrik Larsson (@fredrik_l on MacAdmins Slack)
+    name="SnapGene Viewer"
+    type="dmg"
+    downloadURL="https://www.snapgene.com/local/targets/download.php?variant=viewer&os=mac&majorRelease=latest&minorRelease=latest"
+    expectedTeamID="WVCV9Q8Y78"
+    ;;
+mattermost)
+    # credit: Fredrik Larsson (@fredrik_l on MacAdmins Slack)
+    name="Mattermost"
+    type="dmg"
+    downloadURL=$(downloadURLFromGit mattermost desktop)
+    expectedTeamID="UQ8HT4Q2XM"
+    ;;    
+thunderbird)
+    # credit: @N on MacAdmins Slack
+    name="Thunderbird"
+    type="dmg"
+    downloadURL="https://download.mozilla.org/?product=thunderbird-latest&os=osx&lang=en-US"
+    expectedTeamID="43AQ936H96"
+    blockingProcesses=( thunderbird )
+    ;;
+tigervnc)
+    # credit: @N on MacAdmins Slack
+    name="TigerVNC Viewer"
+    type="dmg"
+    downloadURL=https://dl.bintray.com/tigervnc/stable/$(curl -s -l https://dl.bintray.com/tigervnc/stable/ | grep .dmg | sed 's/<pre><a onclick="navi(event)" href="://' | sed 's/".*//' | sort -V | tail -1)
+    expectedTeamID="S5LX88A9BW"
+    ;;
+bitwarden)
+    # credit: @N on MacAdmins Slack
+    name="Bitwarden"
+    type="dmg"
+    downloadURL=$(downloadURLFromGit bitwarden desktop )
+    expectedTeamID="LTZ2PFU5D6"
+    ;;
+rstudio)
+    # credit: Fredrik Larsson (@fredrik_l on MacAdmins Slack)
+    name="RStudio"
+    type="dmg"
+    downloadURL=$(curl -s -L "https://rstudio.com/products/rstudio/download/" | grep -m 1 -Eio 'href="https://download1.rstudio.org/desktop/macos/RStudio-(.*).dmg"' | cut -c7- | sed -e 's/"$//')
+    expectedTeamID="FYF2F5GFX4"
+    ;;
+keka)
+    # credit: Adrian Bühler (@midni9ht)
+    name="Keka"
+    type="dmg"
+    downloadURL="https://d.keka.io"
+    expectedTeamID="4FG648TM2A"
+    ;;
+androidfiletransfer)
+    #credit: Sam Ess (saess-sep)
+    name="Android File Transfer"
+    type="dmg"
+    downloadURL="https://dl.google.com/dl/androidjumper/mtp/current/AndroidFileTransfer.dmg"
+    expectedTeamID="EQHXZ8M8AV"
+    ;;
+dbeaverce)
+    # credit: Adrian Bühler (@midni9ht)
+    name="DBeaver"
+    type="pkg"
+    downloadURL="https://dbeaver.io/files/dbeaver-ce-latest-installer.pkg"
+    expectedTeamID="42B6MDKMW8"
+    blockingProcesses=( dbeaver )
+    ;;
+onlyofficedesktop)
+    # credit: Adrian Bühler (@midni9ht)
+    name="ONLYOFFICE"
+    type="dmg"
+    downloadURL="https://download.onlyoffice.com/install/desktop/editors/mac/distrib/onlyoffice/ONLYOFFICE.dmg"
+    expectedTeamID="2WH24U26GJ"
+    ;;
+googleearth)
+    # credit: David Chatton (@mdmmac on MacAdmins Slack)
+    name="Google Earth Pro"
+    type="pkgInDmg"
+    downloadURL="https://dl.google.com/earth/client/advanced/current/GoogleEarthProMac-Intel.dmg"
+      expectedTeamID="EQHXZ8M8AV"
+    ;;
+pymol)
+    # credit: Fredrik Larsson (@fredrik_l on MacAdmins Slack)
+    name="PyMOL"
+    type="dmg"
+    downloadURL=$(curl -s -L "https://pymol.org/" | grep -m 1 -Eio 'href="https://pymol.org/installers/PyMOL-(.*)-MacOS(.*).dmg"' | cut -c7- | sed -e 's/"$//')
+    expectedTeamID="26SDDJ756N"
+    ;;
+prism9)
+    # credit: Fredrik Larsson (@fredrik_l on MacAdmins Slack)
+    name="Prism 9"
+    type="dmg"
+    downloadURL="http://cdn.graphpad.com/downloads/prism/9/InstallPrism9.dmg"
+    expectedTeamID="YQ2D36NS9M"
+    ;;  
+gpgsuite)
+    # credit: Micah Lee (@micahflee)
+    name="GPG Suite"
+    type="pkgInDmg"
+    pkgName="Install.pkg"
+    downloadURL=$(curl -s https://gpgtools.org/ | grep https://releases.gpgtools.org/GPG_Suite- | grep Download | cut -d'"' -f4)
+    expectedTeamID="PKV8ZPD836"
+    ;;
+gpgsync)
+    # credit: Micah Lee (@micahflee)
+    name="GPG Sync"
+    type="pkg"
+    downloadURL="https://github.com$(curl -s -L https://github.com/firstlookmedia/gpgsync/releases/latest | grep /firstlookmedia/gpgsync/releases/download | grep \.pkg | cut -d'"' -f2)"
+    expectedTeamID="P24U45L8P5"
+    ;;
+dangerzone)
+    # credit: Micah Lee (@micahflee)
+    name="Dangerzone"
+    type="dmg"
+    downloadURL=$(curl -s https://dangerzone.rocks/ | grep https://github.com/firstlookmedia/dangerzone/releases/download | grep \.dmg | cut -d'"' -f2)
+    expectedTeamID="P24U45L8P5"
+    ;;
+libreoffice)
+    # credit: Micah Lee (@micahflee)
+    name="LibreOffice"
+    type="dmg"
+    downloadURL="https://download.documentfoundation.org/libreoffice/stable/$(curl -s https://www.libreoffice.org/download/download/ | grep dl_version_number | head -n 1 | cut -d'>' -f3 | cut -d'<' -f1)/mac/x86_64/LibreOffice_$(curl -s https://www.libreoffice.org/download/download/ | grep dl_version_number | head -n 1 | cut -d'>' -f3 | cut -d'<' -f1)_MacOS_x86-64.dmg"
+    expectedTeamID="7P5S3ZLCN7"
+    ;;
+sketch)
+    # credit: Alex L. (@aloew on MacAdmins Slack)
+    name="Sketch"
+    type="zip"
+    downloadURL="http://download.sketchapp.com/sketch.zip"
+    expectedTeamID="WUGMZZ5K46"
+    ;;
+abstract)
+    # credit: Alex L. (@aloew on MacAdmins Slack)
+    name="Abstract"
+    type="zip"
+    downloadURL="https://api.goabstract.com/releases/latest/download"
+    expectedTeamID="77MZLZE47D"
+    ;;  
+musescore)
+    # credit: @marcelclaus on MacAdmins Slack
+    name="MuseScore 3"
+    type="dmg"
+    downloadURL=$(downloadURLFromGit musescore MuseScore)
+    expectedTeamID="6EPAF2X3PR"
+    ;;
+toggltrack)
+    # credit: Adrian Bühler (@midni9ht)
+    name="Toggl Track"
+    type="dmg"
+    downloadURL=$(downloadURLFromGit toggl-open-source toggldesktop )
+    expectedTeamID="B227VTMZ94"
+    ;;
+balenaetcher)
+    # credit: Adrian Bühler (@midni9ht)
+    name="balenaEtcher"
+    type="dmg"
+    downloadURL=$(downloadURLFromGit balena-io etcher )
+    expectedTeamID="66H43P8FRG"
+    ;;
+figma)
+    # credit: Alex L. (@aloew on MacAdmins Slack)
+    name="Figma"
+    type="zip"
+    downloadURL="https://www.figma.com/download/desktop/mac/"
+    expectedTeamID="T8RA8NE3B7"
+    ;;
+jetbrainsidea)
+    # credit: Casey Jensen (@cajenson01 on MacAdmins Slack)
+    name="JetBrains IntelliJ Idea"
+    type="dmg"
+    expectedTeamID="2ZEFAR8TH3"
+    #appNewVersion=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=IIU&latest=true&type=release" | grep -o 'version*.*,' | cut -d '"' -f3)
+    downloadURL=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=IIU&latest=true&type=release" | grep -o "mac*.*.dmg" | cut -d '"' -f5)
+    ;;
+jetbrainspycharm)
+    # credit: Casey Jensen (@cajenson01 on MacAdmins Slack)
+    name="JetBrains PyCharm"
+    type="dmg"
+    expectedTeamID="2ZEFAR8TH3"
+    #appNewVersion=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=PCP&latest=true&type=release" | grep -o 'version*.*,' | cut -d '"' -f3)
+    downloadURL=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=PCP&latest=true&type=release" | grep -o "mac*.*.dmg" | cut -d '"' -f5)
+    ;; 
+jetbrainsrubymine)
+    # credit: Casey Jensen (@cajenson01 on MacAdmins Slack)
+    name="JetBrains RubyMine"
+    type="dmg"
+    expectedTeamID="2ZEFAR8TH3"
+    #appNewVersion=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=RM&latest=true&type=release" | grep -o 'version*.*,' | cut -d '"' -f3)
+    downloadURL=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=RM&latest=true&type=release" | grep -o "mac*.*.dmg" | cut -d '"' -f5)
+    ;; 
+jetbrainswebstorm)
+    # credit: Casey Jensen (@cajenson01 on MacAdmins Slack)
+    name="JetBrains Webstorm"
+    type="dmg"
+    expectedTeamID="2ZEFAR8TH3"
+    #appNewVersion=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=WS&latest=true&type=release" | grep -o 'version*.*,' | cut -d '"' -f3)
+    downloadURL=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=WS&latest=true&type=release" | grep -o "mac*.*.dmg" | cut -d '"' -f5)
+    ;; 
+jetbrainsdatagrip)
+    # credit: Casey Jensen (@cajenson01 on MacAdmins Slack)
+    name="JetBrains DataGrip"
+    type="dmg"
+    expectedTeamID="2ZEFAR8TH3"
+    #appNewVersion=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=DG&latest=true&type=release" | grep -o 'version*.*,' | cut -d '"' -f3)
+    downloadURL=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=DG&latest=true&type=release" | grep -o "mac*.*.dmg" | cut -d '"' -f5)
+    ;; 
+jetbrainsclion)
+    # credit: Casey Jensen (@cajenson01 on MacAdmins Slack)
+    name="JetBrains CLion"
+    type="dmg"
+    expectedTeamID="2ZEFAR8TH3"
+    #appNewVersion=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=CL&latest=true&type=release" | grep -o 'version*.*,' | cut -d '"' -f3)
+    downloadURL=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=CL&latest=true&type=release" | grep -o "mac*.*.dmg" | cut -d '"' -f5)
+    ;; 
+jetbrainsgoland)
+    # credit: Casey Jensen (@cajenson01 on MacAdmins Slack)
+    name="JetBrains GoLand"
+    type="dmg"
+    expectedTeamID="2ZEFAR8TH3"
+    #appNewVersion=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=GO&latest=true&type=release" | grep -o 'version*.*,' | cut -d '"' -f3)
+    downloadURL=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=GO&latest=true&type=release" | grep -o "mac*.*.dmg" | cut -d '"' -f5)
+    ;; 
+jetbrainsrider)
+    # credit: Casey Jensen (@cajenson01 on MacAdmins Slack)
+    name="JetBrains Rider"
+    type="dmg"
+    expectedTeamID="2ZEFAR8TH3"
+    #appNewVersion=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=RD&latest=true&type=release" | grep -o 'version*.*,' | cut -d '"' -f3)
+    downloadURL=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=RD&latest=true&type=release" | grep -o "mac*.*.dmg" | cut -d '"' -f5)
+    ;;
+jetbrainsappcode)
+    # credit: Casey Jensen (@cajenson01 on MacAdmins Slack)
+    name="JetBrains AppCode"
+    type="dmg"
+    expectedTeamID="2ZEFAR8TH3"
+    #appNewVersion=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=AC&latest=true&type=release" | grep -o 'version*.*,' | cut -d '"' -f3)
+    downloadURL=$(curl -fs "https://data.services.jetbrains.com/products/releases?code=AC&latest=true&type=release" | grep -o "mac*.*.dmg" | cut -d '"' -f5)
+    ;;  
+jetbrainsideace|\
+intellijideace)
+    # credit: Alex L. (@aloew on MacAdmins Slack)
+    name="IntelliJ IDEA CE"
+    type="dmg"
+    downloadURL="https://download.jetbrains.com/product?code=IIC&latest&distribution=mac"
+    expectedTeamID="2ZEFAR8TH3"
+    ;;
+jetbrainspycharmce|\
+pycharmce)
+    # credit: Alex L. (@aloew on MacAdmins Slack)
+    name="PyCharm CE"
+    type="dmg"
+    downloadURL="https://download.jetbrains.com/product?code=PCC&latest&distribution=mac"
+    expectedTeamID="2ZEFAR8TH3"
+    ;;
+pitch)
+    #credit: @evil mwnci on MacAdmins Slack
+    name="Pitch"
+    type="dmg"
+    downloadURL="https://desktop.pitch.com/mac/Pitch.dmg"
+    expectedTeamID="KUCN8NUU6Z"
+    ;;
+sidekick)
+    #credit: @evil mwnci on MacAdmins Slack
+    name="Sidekick"
+    type="dmg"
+    downloadURL="https://api.meetsidekick.com/downloads/df/mac"
+    expectedTeamID="N975558CUS"
+    ;;
+aircall)
+    # credit: @kris-anderson
+    name="Aircall"
+    type="dmg"
+    downloadURL="https://electron.aircall.io/download/osx"
+    expectedTeamID="3ML357Q795"
+    ;; 
+plantronicshub)
+    # credit: Casey Jensen (@cajenson01 on MacAdmins Slack)
+    name="Plantronics Hub"
+    type="pkgInDmg"
+    pkgName="Plantronics Software.pkg"
+    downloadURL="https://www.poly.com/content/dam/www/software/PlantronicsHubInstaller.dmg"
+    expectedTeamID="SKWK2Q7JJV"
+    #appNewVersion=$(curl -fs "https://www.poly.com/in/en/support/knowledge-base/kb-article-page?lang=en_US&urlName=Hub-Release-Notes&type=Product_Information__kav" | grep -o "(*.*<span>)" | head -1 | cut -d "(" -f2 | sed 's/\<\/span\>//g' | cut -d "<" -f1)
+    ;;
+jabradirect)
+    # credit: Casey Jensen (@cajenson01 on MacAdmins Slack)
+    name="Jabra Direct"
+    type="pkgInDmg"
+    pkgName="JabraDirectSetup.pkg"
+    downloadURL="https://jabraxpressonlineprdstor.blob.core.windows.net/jdo/JabraDirectSetup.dmg"
+    expectedTeamID="55LV32M29R"
+    #appNewVersion=$(curl -fs https://www.jabra.com/Support/release-notes/release-note-jabra-direct | grep -o "Jabra Direct macOS:*.*<" | head -1 | cut -d ":" -f2 | cut -d " " -f2 | cut -d "<" -f1)
+    ;;
+fsmonitor)
+     # credit: Adrian Bühler (@midni9ht)
+     name="FSMonitor"
+     type="zip"
+     downloadURL=$(curl --location --fail --silent "https://fsmonitor.com/FSMonitor/Archives/appcast2.xml" | xpath '//rss/channel/item[last()]/enclosure/@url' 2>/dev/null  | cut -d '"' -f 2)
+     expectedTeamID="V85GBYB7B9"
+     ;;
+ramboxce)
+    # credit: Adrian Bühler (@midni9ht)
+    name="Rambox"
+    type="dmg"
+    downloadURL=$(downloadURLFromGit ramboxapp community-edition )
+    expectedTeamID="7F292FPD69"
+    ;;
+adobebrackets)
+    # credit: Adrian Bühler (@midni9ht)
+    name="Brackets"
+    type="dmg"
+    downloadURL=$(downloadURLFromGit adobe brackets )
+    expectedTeamID="JQ525L2MZD"
+    ;;
+debookee)
+    # credit: Adrian Bühler (@midni9ht)
+    name="Debookee"
+    type="zip"
+    downloadURL=$(curl --location --fail --silent "https://www.iwaxx.com/debookee/appcast.xml" | xpath '//rss/channel/item[1]/enclosure/@url' 2>/dev/null  | cut -d '"' -f 2)
+    expectedTeamID="AATLWWB4MZ"
+    ;;
+ferdi)
+    # credit: Adrian Bühler (@midni9ht)
+    name="Ferdi"
+    type="dmg"
+    downloadURL=$(downloadURLFromGit getferdi ferdi )
+    expectedTeamID="B6J9X9DWFL"
+    ;;
+hyper)
+    # credit: Adrian Bühler (@midni9ht)
+    name="Hyper"
+    type="dmg"
+    downloadURL=$(downloadURLFromGit vercel hyper )
+    expectedTeamID="JW6Y669B67"
+    ;;
+menumeters)
+    # credit: Adrian Bühler (@midni9ht)
+    name="MenuMeters"
+    type="zip"
+    downloadURL=$(downloadURLFromGit yujitach MenuMeters )
+    expectedTeamID="95AQ7YKR5A"
+    ;;
+vagrant)
+    # credit: AP Orlebeke (@apizz)
+    name="Vagrant"
+    type="pkgInDmg"
+    pkgName="vagrant.pkg"
+    downloadURL=$(curl -fs https://www.vagrantup.com/downloads.html \
+        | tr '><' '\n' | awk -F'"' '/x86_64.dmg/ {print $6}' | head -1)
+    expectedTeamID="D38WU7D763"
+    ;;
+jamfconnect)
+    #credit: @marcelclaus on MacAdmins Slack
+    name="JamfConnect"
+    type="pkgInDmg"
+    downloadURL="https://files.jamfconnect.com/JamfConnect.dmg"
+    expectedTeamID="483DWKW443"
+    ;;
+etrecheck)
+    #credit: David Schultz (@dvsjr on MacAdmins Slack)
+    name="EtreCheckPro"
+    type="zip"
+    downloadURL="https://cdn.etrecheck.com/EtreCheckPro.zip"
+    expectedTeamID="U87NE528LC"
+    ;;
+
 
 # MARK: add new labels above here
 
@@ -1419,6 +1939,15 @@ microsoftdefenderatp)
     updateTool="/Library/Application Support/Microsoft/MAU2.0/Microsoft AutoUpdate.app/Contents/MacOS/msupdate"
     updateToolArguments=( --install --apps WDAV00 )
     ;;
+microsoftlicenseremovaltool)
+    # credit: Isaac Ordonez, Mann consulting (@mannconsulting)
+    name="Microsoft License Removal Tool"
+    type="pkg"
+    downloadURL="https://go.microsoft.com/fwlink/?linkid=849815"
+    expectedTeamID="QGS93ZLCU7"
+    # appNewVersion=$(curl -is "$downloadURL" | grep ocation: | grep -o "Microsoft_.*pkg" | cut -d "_" -f 5 | cut -d "." -f1-2)
+    ;;
+
 
 # this description is so you can provide all variables as arguments
 # it will only check if the required variables are setting
